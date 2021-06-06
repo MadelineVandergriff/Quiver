@@ -65,7 +65,7 @@ struct DiscreteVelocitySystem : qv::System<Transform, Velocity> {
 };
 
 int main() {
-    qv::World::RegisterComponent<Transform, Velocity>();
+    qv::World::registerComponent<Transform, Velocity>();
     
     // Calls underlying qv::System to register with qv::World
     DiscreteVelocitySystem::registerSystem();

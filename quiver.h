@@ -74,8 +74,7 @@ namespace qv {
             Registrar<Component>::signature.set(componentId);
             Registrar<Component>::signatureBit = componentId;
             destructors.push_back(&Registrar<Component>::removeComponent);
-            systemSetPointers.template emplace_back();
-            //constructors.template emplace(componentId, &Registrar<Component>::createComponent);
+            systemDescriptors.template emplace_back();
 
             componentId++;
             if constexpr (sizeof...(Components) != 0) {
@@ -85,7 +84,7 @@ namespace qv {
 
         static EntityHandle createEntity() {
             entitySignatures.emplace(EntityHandle{entityId}, ComponentSignature{});
-            entitySets.emplace(EntityHandle{entityId}, std::set<std::set<EntityHandle>*>{});
+            entitySystemDescriptors.emplace(EntityHandle{entityId}, std::set<SystemDescriptor*>{});
             return entityId++;
         }
 
@@ -97,42 +96,47 @@ namespace qv {
                 }
             }
 
-            for (const auto& set : entitySets.at(handle)) {
-                set->erase(handle);
+            for (const auto descriptor : entitySystemDescriptors.at(handle)) {
+                descriptor->set->erase(handle);
+                descriptor->regenerateComponentList();
             }
 
-            entitySets.erase(handle);
+            entitySystemDescriptors.erase(handle);
             entitySignatures.erase(handle);
         }
 
         template<typename Component>
         static void addComponent(EntityHandle handle) {
             entitySignatures.at(handle).set(Registrar<Component>::signatureBit);
+            Registrar<Component>::createComponent(handle);
+
             std::ranges::for_each(
-                systemSetPointers.at(Registrar<Component>::signatureBit)
-                | std::views::filter([handle](auto& pair){
-                    return World::compareSignatures(entitySignatures.at(handle), pair.first);
+                systemDescriptors.at(Registrar<Component>::signatureBit)
+                | std::views::filter([handle](auto& descriptor){
+                    return World::compareSignatures(entitySignatures.at(handle), descriptor.signature);
                 }),
-                [handle](auto& pair) {
-                    pair.second->insert(handle);
-                    World::entitySets.at(handle).insert(pair.second);
+                [handle](auto& descriptor) {
+                    descriptor.set->insert(handle);
+                    descriptor.regenerateComponentList();
+                    World::entitySystemDescriptors.at(handle).template emplace(&descriptor);
                 }
             );
-            Registrar<Component>::createComponent(handle);
         }
 
         template<typename Component>
         static void removeComponent(EntityHandle handle) {
             std::ranges::for_each(
-                systemSetPointers.at(Registrar<Component>::signatureBit)
-                | std::views::filter([handle](auto& pair){
-                    return World::compareSignatures(entitySignatures.at(handle), pair.first);
+                systemDescriptors.at(Registrar<Component>::signatureBit)
+                | std::views::filter([handle](auto& descriptor){
+                    return World::compareSignatures(entitySignatures.at(handle), descriptor.signature);
                 }),
-                [handle](auto& pair) {
-                    pair.second->erase(handle);
-                    World::entitySets.at(handle).erase(pair.second);
+                [handle](auto& descriptor) {
+                    descriptor.set->erase(handle);
+                    descriptor.regenerateComponentList();
+                    World::entitySystemDescriptors.at(handle).erase(&descriptor);
                 }
             );
+
             entitySignatures.at(handle).reset(Registrar<Component>::signatureBit);
             Registrar<Component>::removeComponent(handle);
         }
@@ -146,6 +150,13 @@ namespace qv {
             }
         }
 
+    private:
+        struct SystemDescriptor {
+            ComponentSignature signature;
+            std::set<EntityHandle>* set{nullptr};
+            std::function<void()> regenerateComponentList;
+        };
+
         static bool compareSignatures(ComponentSignature entity, ComponentSignature system) {
             return (entity & system) == system;
         }
@@ -154,9 +165,12 @@ namespace qv {
         static inline size_t entityId = 1; // Uses ID 0 for a null handle
 
         static inline std::vector<std::function<void(EntityHandle)>> destructors;
-        static inline std::vector<std::vector<std::pair<ComponentSignature, std::set<EntityHandle>*>>> systemSetPointers;
+        static inline std::vector<std::vector<SystemDescriptor>> systemDescriptors;
         static inline std::map<EntityHandle, ComponentSignature> entitySignatures;
-        static inline std::map<EntityHandle, std::set<std::set<EntityHandle>*>> entitySets;
+        static inline std::map<EntityHandle, std::set<SystemDescriptor*>> entitySystemDescriptors;
+
+        template<typename...>
+        friend class System;
     };
 
     template<typename... Components>
@@ -168,21 +182,30 @@ namespace qv {
             auto signature = World::generateSignature<Components...>();
             for (size_t bit = 0; bit < signature.size(); bit++) {
                 if (signature.test(bit)) {
-                    World::systemSetPointers.at(bit).template emplace_back(signature, &entities);
+                    World::systemDescriptors.at(bit).template emplace_back(signature, &entities, regenerateComponentList);
                 }
             }
             registered = true;
         }
 
-        static auto getComponents() {
-            return entities | std::views::transform([](EntityHandle handle){
-                return std::make_tuple<std::reference_wrapper<Components>..., EntityHandle>(
-                    std::ref(Registrar<Components>::getComponent(handle))..., EntityHandle{handle}
-                );
-            });
+        static std::vector<std::tuple<Components&..., EntityHandle>>& getComponents() {
+            return componentList;
+        }
+
+        static void regenerateComponentList() {
+            componentList.clear();
+            componentList.reserve(entities.size());
+            std::ranges::copy(entities | std::views::transform(getComponentTuple), std::back_inserter(componentList));
         }
     private:
+        static decltype(auto) getComponentTuple(EntityHandle handle) {
+            return std::make_tuple<std::reference_wrapper<Components>..., EntityHandle>(
+                    std::ref(Registrar<Components>::getComponent(handle))..., EntityHandle{handle}
+            );
+        }
+
         static inline std::set<EntityHandle> entities;
+        static inline std::vector<std::tuple<Components&..., EntityHandle>> componentList;
         static inline bool registered = false;
     };
 
